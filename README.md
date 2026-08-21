@@ -1,10 +1,10 @@
-<<<<<<< HEAD
+
 
 # HACKATHON
 
-=======
+
 ```markdown
->>>>>>> fffa3ce (Updated README with complete setup instructions)
+
 # 🏙️ UrbanPulse AI
 **Autonomous Urban Pothole, Structural Defect & Micro-Flooding Lifecycle Engine**
 
