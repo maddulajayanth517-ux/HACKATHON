@@ -1,0 +1,21 @@
+# --- Member 1: Vision Perception ---
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+ultralytics>=8.0.0  # Optional: Only if using YOLO
+
+# --- Member 2: Agent Orchestration ---
+langchain-core>=0.1.52
+langchain-community>=0.0.38
+langgraph>=0.0.26
+pydantic>=2.5.0
+
+# --- Member 3: Backend & GIS ---
+fastapi>=0.109.0
+uvicorn>=0.27.0
+geopy>=2.4.1
+
+# --- Member 4: Frontend UI ---
+streamlit>=1.31.0
+streamlit-folium>=0.17.0
+folium>=0.15.0
