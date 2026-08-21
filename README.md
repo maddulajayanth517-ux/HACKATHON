@@ -1,6 +1,10 @@
+<<<<<<< HEAD
 
 # HACKATHON
 
+=======
+```markdown
+>>>>>>> fffa3ce (Updated README with complete setup instructions)
 # 🏙️ UrbanPulse AI
 **Autonomous Urban Pothole, Structural Defect & Micro-Flooding Lifecycle Engine**
 
@@ -25,6 +29,51 @@ UrbanPulse AI is a multi-agent, vision-powered system that ingests citizen dashc
 
 **1. Clone the repository**
 ```bash
+<<<<<<< HEAD
 git clone [https://github.com/YourUsername/UrbanPulse-AI.git](https://github.com/YourUsername/UrbanPulse-AI.git)
 cd UrbanPulse-AI
+
+=======
+git clone [https://github.com/maddulajayanth517-ux/HACKATHON.git](https://github.com/maddulajayanth517-ux/HACKATHON.git)
+cd HACKATHON
+
+```
+
+**2. Create a virtual environment & install dependencies**
+
+```bash
+python -m venv venv
+# On Windows:
+venv\Scripts\activate
+# On macOS/Linux:
+# source venv/bin/activate
+
+pip install -r requirements.txt
+
+```
+
+**3. Run the Backend API (Terminal 1)**
+
+```bash
+uvicorn app.main:app --reload
+
+```
+
+**4. Run the Streamlit Dashboard (Terminal 2)**
+
+```bash
+streamlit run frontend/app.py
+
+```
+
+## 🤝 Team 4
+
+* **Member 1:** Vision Perception Lead
+* **Member 2:** Agent Orchestration Lead
+* **Member 3:** GIS, Backend & Dispatch Lead
+* **Member 4:** Full-Stack UI & Demo Lead
+
+```
+
+``` 
 
