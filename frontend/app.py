@@ -1,10 +1,12 @@
 import os
 import random
+from urllib.parse import quote
 
 import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_geolocation import streamlit_geolocation
 from PIL import Image
 
 BACKEND_BASE_URL = "http://127.0.0.1:8000"
@@ -97,6 +99,21 @@ def render_detection(defect_type, severity, confidence, media_kind):
     )
 
 
+def analyze_uploaded_media(media, latitude, longitude, manual_address, severity):
+    files = {
+        "media": (media.name, media.getvalue(), media.type or "application/octet-stream")
+    }
+    data = {"severity": severity, "manual_address": manual_address}
+    if latitude is not None and longitude is not None:
+        data.update({"latitude": latitude, "longitude": longitude})
+    return requests.post(
+        f"{BACKEND_BASE_URL}/api/report/analyze",
+        files=files,
+        data=data,
+        timeout=300,
+    )
+
+
 defects_list = fetch_defects()
 
 with st.sidebar:
@@ -117,39 +134,59 @@ if page == "New Report":
     report_column, map_column = st.columns([1.08, 0.92], gap="large")
 
     with report_column:
-        st.markdown("<div class='section-title'>Report evidence</div><div class='section-copy'>Upload JPG, PNG, WEBP, or MP4. Vision results appear once media is selected.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Report evidence</div><div class='section-copy'>Upload a photo or MP4 video. The backend will analyze the actual media.</div>", unsafe_allow_html=True)
         uploaded_media = st.file_uploader("Upload report media", type=MEDIA_TYPES, help="Images and MP4 videos are supported.")
-        detected_class, suggested_severity, media_kind = "Manual report", "High", None
+        detected_class, suggested_severity, media_kind = "Road defect", "High", None
         if uploaded_media is not None:
             media_kind = render_preview(uploaded_media)
-            detected_class, suggested_severity, confidence = detect_issue(uploaded_media.name)
-            render_detection(detected_class, suggested_severity, confidence, media_kind)
 
-        st.markdown("<div class='section-title'>Location and dispatch</div><div class='section-copy'>Confirm coordinates and assign the verified severity.</div>", unsafe_allow_html=True)
-        latitude_column, longitude_column = st.columns(2)
-        with latitude_column:
-            latitude = st.number_input("Latitude", value=16.5062, format="%.4f", key="report_latitude")
-        with longitude_column:
-            longitude = st.number_input("Longitude", value=80.6480, format="%.4f", key="report_longitude")
-        severity_column, email_column = st.columns([0.7, 1.3])
-        with severity_column:
-            severity_options = ["High", "Medium", "Low"]
-            severity = st.selectbox("Verified severity", severity_options, index=severity_options.index(suggested_severity))
-        with email_column:
-            contractor_email = st.text_input("Contractor email", value="contractor@cityworks.gov")
+        st.markdown("<div class='section-title'>Location permission</div><div class='section-copy'>Allow location access if you are at the reported place. Otherwise enter its address manually.</div>", unsafe_allow_html=True)
+        location = streamlit_geolocation()
+        latitude = location.get("latitude") if location else None
+        longitude = location.get("longitude") if location else None
+        if latitude is not None and longitude is not None:
+            st.success(f"Location permission granted: {latitude:.6f}, {longitude:.6f}")
+            manual_address = ""
+        else:
+            st.info("Location was not granted or is unavailable. Manual address is required.")
+            manual_address = st.text_input("Reported place or address", placeholder="Street, area, city")
 
-        if st.button("Dispatch work order", type="primary", use_container_width=True):
-            payload = {"defect_type": detected_class, "severity": severity, "latitude": latitude, "longitude": longitude, "contractor_email": contractor_email}
-            with st.spinner("Preparing dispatch..."):
-                try:
-                    response = requests.post(f"{BACKEND_BASE_URL}/api/geo/dispatch", json=payload, timeout=8)
-                    if response.status_code == 200:
-                        st.session_state["last_dispatch"] = response.json()
-                    else:
-                        st.error("The backend could not process this work order.")
-                except requests.RequestException:
-                    st.session_state["last_dispatch"] = {"status": "PROCESSED_AND_DISPATCHED", "record_id": random.randint(100, 999), "address": "Standalone demonstration location", "elevation_meters": 45, "google_maps_route": f"https://www.google.com/maps/dir/?api=1&destination={latitude},{longitude}"}
-                    st.info("Saved as a local demonstration work order because the backend is offline.")
+        severity_options = ["High", "Medium", "Low"]
+        severity = st.selectbox("Suggested severity", severity_options, index=0)
+
+        if st.button("Analyze uploaded media", type="primary", use_container_width=True):
+            if uploaded_media is None:
+                st.error("Upload a photo or video first.")
+            elif latitude is None and not manual_address.strip():
+                st.error("Grant location permission or enter the reported address.")
+            else:
+                with st.spinner("Analyzing media and resolving location..."):
+                    try:
+                        response = analyze_uploaded_media(uploaded_media, latitude, longitude, manual_address, severity)
+                        if response.status_code == 200:
+                            st.session_state["analysis"] = response.json()
+                        else:
+                            st.error(response.json().get("detail", "The backend could not analyze this media."))
+                    except requests.RequestException as error:
+                        st.error(f"Backend unavailable: {error}")
+
+        analysis = st.session_state.get("analysis")
+        if analysis:
+            if analysis.get("status") == "NO_DEFECT_DETECTED":
+                st.success(analysis.get("message", "No defect was confirmed."))
+            else:
+                vision = analysis.get("vision", {})
+                st.success(f"Confirmed: {vision.get('defect_type', 'Road defect')} | severity {severity}")
+                st.caption(f"Address: {analysis.get('address')} | Flood risk: {'High' if analysis.get('is_flood_prone') else 'Normal'}")
+                email = analysis.get("email", {})
+                recipient = st.text_input("Municipal corporation email", placeholder="roads@municipality.gov")
+                subject = st.text_input("Email subject", value=email.get("subject", "Infrastructure report"))
+                body = st.text_area("Review and edit the generated email", value=email.get("body", ""), height=260)
+                if recipient.strip():
+                    gmail_url = "https://mail.google.com/mail/?view=cm&fs=1&to=" + quote(recipient)
+                    gmail_url += "&su=" + quote(subject) + "&body=" + quote(body)
+                    st.link_button("Open Gmail draft", gmail_url, use_container_width=True)
+                    st.caption("Gmail requires you to review and press Send. This app cannot send email without your explicit action.")
 
         if "last_dispatch" in st.session_state:
             dispatch = st.session_state["last_dispatch"]
