@@ -1,0 +1,23 @@
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual Environments
+venv/
+env/
+.env
+
+# Project Specific
+temp/
+tests/temp/
+*.log
+
+# OS Generated
+.DS_Store
+Thumbs.db
+
+# Deep Learning / YOLO Models (If you decide to download them)
+*.pt
+*.onnx
