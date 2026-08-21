@@ -14,6 +14,9 @@ env/
 temp/
 tests/temp/
 *.log
+*.db
+test_map.html
+dispatch_map.html
 
 # OS Generated
 .DS_Store
