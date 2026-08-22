@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
+from app.database import init_db, seed_sample_data
 from app.geo.database import get_all_defects
 from app.geo.geo_dispatch import (
     get_elevation_and_flood_risk,
@@ -21,6 +22,12 @@ app = FastAPI(
     description="Autonomous Road Defect & Micro-Flooding Lifecycle Engine",
     version="1.0.0",
 )
+
+# Initialize the SQLAlchemy database tables at startup.
+@app.on_event("startup")
+def startup_event():
+    init_db()
+    seed_sample_data()
 
 # Enable CORS for frontend integration
 app.add_middleware(
@@ -192,6 +199,12 @@ def generate_map():
     """Generates and returns the path to the updated Folium defect map."""
     map_file = render_folium_map("dispatch_map.html")
     return {"status": "success", "map_path": map_file}
+
+
+@app.get("/api/sample-db")
+def sample_db_status():
+    """Returns a sample authority, contractor, and complaint record for demo verification."""
+    return seed_sample_data()
 
 
 if __name__ == "__main__":

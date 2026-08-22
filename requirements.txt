@@ -14,6 +14,7 @@ pydantic>=2.5.0
 fastapi>=0.109.0
 uvicorn>=0.27.0
 geopy>=2.4.1
+SQLAlchemy>=2.0.0
 
 # --- Member 4: Frontend UI ---
 streamlit>=1.31.0
