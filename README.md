@@ -18,7 +18,7 @@ UrbanPulse AI is a multi-agent, vision-powered system that ingests citizen dashc
 * **Backend:** FastAPI (Python)
 * **Agent Framework:** LangGraph
 * **Computer Vision:** OpenCV
-* **Data Storage:** SQLite (Local)
+* **Data Storage:** MongoDB (Atlas or local MongoDB)
 
 ## 💻 Local Setup Instructions
 
@@ -56,7 +56,7 @@ streamlit run frontend/app.py --server.port 8501
 
 Open the dashboard at `http://127.0.0.1:8501/`. The API runs at `http://127.0.0.1:8001/`.
 
-The first startup creates the local SQLite database and demo staff accounts. Demo authority access is `city_ops` / `urbanpulse-demo`; replace seeded credentials before deployment.
+Set `MONGO_URI` and optionally `MONGO_DATABASE` before production use. When `MONGO_URI` is empty or unavailable, the app uses an in-memory demo store so the hackathon flow remains runnable without silently creating a SQLite database. The seed data includes one authority, one pincode mapping (`520010`), one contractor, and one trackable complaint (`CMP-2026-00001`). Demo authority access is `city_ops` / `urbanpulse-demo`; replace seeded credentials before deployment.
 
 ## 🤝 Team 4
 

@@ -1,6 +1,8 @@
 import os
 import secrets
 import tempfile
+from datetime import datetime, timezone
+import re
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -8,13 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-from app.database import init_db as init_sqlalchemy_db, seed_sample_data
 from app.geo.database import get_all_defects, init_db as init_geo_db
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
+from app.mongo_store import store
 from app.auth import verify_password
-from app.database import get_db
 from app.email_alerts import alert_authority_via_email
 from app.geo.geo_dispatch import (
     get_coordinates_from_address,
@@ -24,7 +22,6 @@ from app.geo.geo_dispatch import (
     render_folium_map,
 )
 from app.vision.vision_engine import analyze_media
-from app.models import Authority, Complaint, ComplaintStatus, Contractor
 
 app = FastAPI(
     title="UrbanPulse-AI API",
@@ -32,12 +29,12 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Initialize the SQLAlchemy database tables at startup.
+# Initialize the MongoDB collections and indexes at startup.
 @app.on_event("startup")
 def startup_event():
-    init_sqlalchemy_db()
+    store.init()
     init_geo_db()
-    seed_sample_data()
+    store.seed()
 
 # Enable CORS for frontend integration
 app.add_middleware(
@@ -51,8 +48,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup_db_and_map():
-    """Initializes the database and pre-renders the dispatch map."""
-    init_geo_db()
+    """Pre-renders the dispatch map."""
     render_folium_map("dispatch_map.html")
 
 
@@ -72,7 +68,7 @@ class LoginRequest(BaseModel):
 
 
 class ComplaintStatusRequest(BaseModel):
-    status: ComplaintStatus
+    status: str
     contractor_id: int | None = None
 
 
@@ -87,21 +83,11 @@ def require_role(authorization: str | None, role: str) -> dict:
     return session
 
 
-def complaint_payload(complaint: Complaint) -> dict:
-    return {
-        "id": complaint.id,
-        "reporter_phone": complaint.reporter_phone,
-        "latitude": complaint.location_lat,
-        "longitude": complaint.location_lon,
-        "address": complaint.manual_address,
-        "severity_level": complaint.severity_level,
-        "estimated_depth_cm": complaint.estimated_depth_cm,
-        "status": complaint.status.value,
-        "authority_id": complaint.authority_id,
-        "contractor_id": complaint.assigned_contractor_id,
-        "created_at": complaint.created_at.isoformat(),
-        "updated_at": complaint.updated_at.isoformat(),
-    }
+def complaint_payload(complaint: dict) -> dict:
+    payload = {key: value for key, value in complaint.items() if not key.startswith("_")}
+    payload.setdefault("id", payload.get("complaint_id"))
+    payload.setdefault("address", payload.get("manual_address"))
+    return payload
 
 
 def build_email_draft(
@@ -154,14 +140,17 @@ async def analyze_report_media(
     latitude: float | None = Form(default=None),
     longitude: float | None = Form(default=None),
     manual_address: str = Form(default=""),
+    pincode: str = Form(default=""),
     severity: str = Form(default="High"),
     reporter_phone: str = Form(default=""),
-    db: Session = Depends(get_db),
 ):
     """Analyze uploaded evidence, resolve location via GPS/Geocoding, and return a reviewable email draft."""
 
     if not media.filename:
         raise HTTPException(status_code=400, detail="A photo or video is required.")
+    pincode = pincode.strip()
+    if not re.fullmatch(r"\d{6}", pincode):
+        raise HTTPException(status_code=400, detail="Enter a valid 6-digit pincode.")
     if (latitude is None or longitude is None) and not manual_address.strip():
         raise HTTPException(
             status_code=400,
@@ -217,6 +206,9 @@ async def analyze_report_media(
         defect_type = vision_result.get("defect_type", "Road defect")
         confidence = vision_result.get("confidence", "Confirmed by repeated evidence")
         vision_result["source_file"] = media.filename
+        authority = store.collection("pincode_areas").find_one({"pincode": pincode})
+        if authority is None or not authority.get("active", False):
+            raise HTTPException(status_code=422, detail="No active authority is mapped to this pincode.")
 
         # 4. Dispatch, Save to Database, and Update Folium Map
         dispatch_result = process_and_dispatch_defect(
@@ -239,28 +231,44 @@ async def analyze_report_media(
         )
         # Render updated HTML map
         render_folium_map("dispatch_map.html")
-        complaint = Complaint(
-            reporter_phone=reporter_phone.strip(),
-            location_lat=latitude,
-            location_lon=longitude,
-            manual_address=address,
-            severity_level=vision_result.get("severity_level") or severity,
-            estimated_depth_cm=vision_result.get("estimated_depth_cm"),
-            image_path=media.filename,
-            status=ComplaintStatus.PENDING_VERIFICATION,
-        )
-        db.add(complaint)
-        db.commit()
-        db.refresh(complaint)
+        complaint = {
+            "complaint_id": store.next_complaint_id(),
+            "reporter_phone": reporter_phone.strip(),
+            "complaint_type": defect_type,
+            "title": f"{defect_type} reported by citizen",
+            "description": "AI-analyzed urban infrastructure complaint.",
+            "pincode": pincode,
+            "area": authority.get("area") if authority else None,
+            "ward_number": authority.get("ward_number") if authority else None,
+            "location_lat": latitude,
+            "location_lon": longitude,
+            "latitude": latitude,
+            "longitude": longitude,
+            "location_point": {"type": "Point", "coordinates": [longitude, latitude]},
+            "manual_address": address,
+            "severity_level": vision_result.get("severity_level") or severity,
+            "estimated_depth_cm": vision_result.get("estimated_depth_cm"),
+            "image_path": media.filename,
+            "status": "PENDING_VERIFICATION",
+            "authority_id": authority.get("authority_id") if authority else None,
+            "authority_name": authority.get("authority_name") if authority else None,
+            "department": authority.get("department") if authority else None,
+            "authority_email": authority.get("authority_email") if authority else os.getenv("AUTHORITY_ALERT_EMAIL", "ops@urbanpulse.gov"),
+            "email_status": "Demo" if not os.getenv("SMTP_PASSWORD") else "Sent",
+            "duplicate_status": "New",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        store.collection("complaints").insert_one(complaint)
         notification_sent = alert_authority_via_email(
             {
-                "complaint_id": complaint.id,
-                "severity_level": complaint.severity_level,
-                "manual_address": complaint.manual_address,
-                "reporter_phone": complaint.reporter_phone,
-                "estimated_depth_cm": complaint.estimated_depth_cm,
+                "complaint_id": complaint["complaint_id"],
+                "severity_level": complaint["severity_level"],
+                "manual_address": complaint["manual_address"],
+                "reporter_phone": complaint["reporter_phone"],
+                "estimated_depth_cm": complaint["estimated_depth_cm"],
             },
-            os.getenv("AUTHORITY_ALERT_EMAIL", "ops@urbanpulse.gov"),
+            complaint["authority_email"],
         )
         return {
             "status": "ANALYZED",
@@ -284,37 +292,46 @@ async def analyze_report_media(
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest):
     """Issue a short-lived in-memory role token for verified staff accounts."""
     role = payload.role.strip().lower()
     if role not in {"authority", "contractor"}:
         raise HTTPException(status_code=400, detail="Only authority or contractor login is supported.")
-    model = Authority if role == "authority" else Contractor
-    account = db.scalar(
-        select(model).where((model.email == payload.identifier) | (model.username == payload.identifier))
-        if role == "authority"
-        else select(model).where(model.email == payload.identifier)
+    collection = store.collection("authorities" if role == "authority" else "contractors")
+    account = collection.find_one(
+        {"username": payload.identifier} if role == "authority" else {"email": payload.identifier}
     )
-    if account is None or not verify_password(payload.password, account.password_hash):
+    if account is None or not verify_password(payload.password, account.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Invalid staff credentials.")
     token = secrets.token_urlsafe(32)
-    ACTIVE_TOKENS[token] = {"role": role, "account_id": account.id}
-    return {"access_token": token, "role": role, "account_id": account.id}
+    ACTIVE_TOKENS[token] = {"role": role, "account_id": account.get("authority_id", account.get("contractor_id", account.get("email")))}
+    return {"access_token": token, "role": role, "account_id": ACTIVE_TOKENS[token]["account_id"]}
 
 
 @app.get("/api/complaints/{complaint_id}")
-def get_complaint_status(complaint_id: int, reporter_phone: str, db: Session = Depends(get_db)):
+def get_complaint_status(complaint_id: str, reporter_phone: str):
     """Allow a citizen to view a complaint only with its matching phone number."""
-    complaint = db.get(Complaint, complaint_id)
-    if complaint is None or complaint.reporter_phone != reporter_phone.strip():
+    complaint = store.collection("complaints").find_one({"complaint_id": complaint_id})
+    if complaint is None or complaint.get("reporter_phone") != reporter_phone.strip():
         raise HTTPException(status_code=404, detail="Complaint not found.")
     return complaint_payload(complaint)
 
 
+@app.get("/api/pincodes/{pincode}")
+def lookup_pincode(pincode: str):
+    """Return the active authority mapped to a six-digit pincode."""
+    if not re.fullmatch(r"\d{6}", pincode.strip()):
+        raise HTTPException(status_code=400, detail="Pincode must contain exactly 6 digits.")
+    area = store.collection("pincode_areas").find_one({"pincode": pincode.strip()})
+    if area is None or not area.get("active", False):
+        raise HTTPException(status_code=404, detail="No active authority is mapped to this pincode.")
+    return {key: value for key, value in area.items() if not key.startswith("_")}
+
+
 @app.get("/api/authority/complaints")
-def authority_complaints(authorization: str | None = Header(default=None), db: Session = Depends(get_db)):
+def authority_complaints(authorization: str | None = Header(default=None)):
     session = require_role(authorization, "authority")
-    complaints = db.scalars(select(Complaint).order_by(Complaint.created_at.desc())).all()
+    complaints = store.collection("complaints").find(sort=[("created_at", -1)])
     return {"authority_id": session["account_id"], "complaints": [complaint_payload(item) for item in complaints]}
 
 
@@ -323,21 +340,19 @@ def update_complaint(
     complaint_id: int,
     payload: ComplaintStatusRequest,
     authorization: str | None = Header(default=None),
-    db: Session = Depends(get_db),
 ):
     session = require_role(authorization, "authority")
-    complaint = db.get(Complaint, complaint_id)
+    complaint = store.collection("complaints").find_one({"complaint_id": complaint_id})
     if complaint is None:
         raise HTTPException(status_code=404, detail="Complaint not found.")
-    complaint.status = payload.status
-    complaint.authority_id = session["account_id"]
+    complaint["status"] = payload.status
+    complaint["authority_id"] = session["account_id"]
     if payload.contractor_id is not None:
-        if db.get(Contractor, payload.contractor_id) is None:
-            raise HTTPException(status_code=404, detail="Contractor not found.")
-        complaint.assigned_contractor_id = payload.contractor_id
-        complaint.status = ComplaintStatus.ASSIGNED_TO_CONTRACTOR
-    db.commit()
-    db.refresh(complaint)
+        complaint["assigned_contractor_id"] = payload.contractor_id
+        complaint["status"] = "ASSIGNED_TO_CONTRACTOR"
+    store.collection("complaints").find_one_and_update(
+        {"complaint_id": complaint_id}, {"$set": complaint}
+    )
     return complaint_payload(complaint)
 
 
@@ -346,17 +361,17 @@ def contractor_update_complaint(
     complaint_id: int,
     payload: ComplaintStatusRequest,
     authorization: str | None = Header(default=None),
-    db: Session = Depends(get_db),
 ):
     session = require_role(authorization, "contractor")
-    complaint = db.get(Complaint, complaint_id)
-    if complaint is None or complaint.assigned_contractor_id != session["account_id"]:
+    complaint = store.collection("complaints").find_one({"complaint_id": complaint_id})
+    if complaint is None or complaint.get("assigned_contractor_id") != session["account_id"]:
         raise HTTPException(status_code=404, detail="Assigned complaint not found.")
-    if payload.status not in {ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED}:
+    if payload.status not in {"IN_PROGRESS", "RESOLVED"}:
         raise HTTPException(status_code=400, detail="Contractors can set only IN_PROGRESS or RESOLVED.")
-    complaint.status = payload.status
-    db.commit()
-    db.refresh(complaint)
+    complaint["status"] = payload.status
+    store.collection("complaints").find_one_and_update(
+        {"complaint_id": complaint_id}, {"$set": complaint}
+    )
     return complaint_payload(complaint)
 
 
@@ -406,7 +421,7 @@ def generate_map():
 @app.get("/api/sample-db")
 def sample_db_status():
     """Returns a sample authority, contractor, and complaint record for demo verification."""
-    return seed_sample_data()
+    return store.seed()
 
 
 if __name__ == "__main__":

@@ -133,11 +133,11 @@ def render_preview(media):
     return "image"
 
 
-def analyze_uploaded_media(media, latitude, longitude, manual_address, severity, reporter_phone):
+def analyze_uploaded_media(media, latitude, longitude, manual_address, pincode, severity, reporter_phone):
     files = {
         "media": (media.name, media.getvalue(), media.type or "application/octet-stream")
     }
-    data = {"severity": severity, "manual_address": manual_address, "reporter_phone": reporter_phone}
+    data = {"severity": severity, "manual_address": manual_address, "pincode": pincode, "reporter_phone": reporter_phone}
     if latitude is not None and longitude is not None:
         data.update({"latitude": latitude, "longitude": longitude})
     return requests.post(
@@ -265,6 +265,17 @@ if page == "New Report":
 
         severity_options = ["High", "Medium", "Low"]
         severity = st.selectbox("Suggested severity", severity_options, index=0)
+        pincode = st.text_input("Pincode (required for authority routing)", max_chars=6, placeholder="Example: 520010")
+        if len(pincode.strip()) == 6 and pincode.strip().isdigit():
+            jurisdiction = api_request("GET", f"/api/pincodes/{pincode.strip()}")
+            if jurisdiction is not None and jurisdiction.status_code == 200:
+                authority = jurisdiction.json()
+                st.success(
+                    f"Assigned authority: {authority['authority_name']} | "
+                    f"{authority['department']} | Ward {authority['ward_number']}"
+                )
+            elif jurisdiction is not None and jurisdiction.status_code == 404:
+                st.warning("No active authority is mapped to this pincode yet.")
         reporter_phone = st.text_input("Your phone number", placeholder="Used only to track this complaint")
 
         if st.button("Analyze uploaded media", type="primary", use_container_width=True):
@@ -275,11 +286,14 @@ if page == "New Report":
             else:
                 with st.spinner("Analyzing media and resolving location..."):
                     try:
-                        if not reporter_phone.strip():
+                        if not pincode.strip().isdigit() or len(pincode.strip()) != 6:
+                            st.error("Enter a valid 6-digit pincode so we can find the responsible authority.")
+                            response = None
+                        elif not reporter_phone.strip():
                             st.error("Enter a phone number so you can track the complaint.")
                             response = None
                         else:
-                            response = analyze_uploaded_media(uploaded_media, active_lat, active_lon, manual_address, severity, reporter_phone)
+                            response = analyze_uploaded_media(uploaded_media, active_lat, active_lon, manual_address, pincode, severity, reporter_phone)
                         if response is not None and response.status_code == 200:
                             analysis_result = response.json()
                             st.session_state["analysis"] = analysis_result
