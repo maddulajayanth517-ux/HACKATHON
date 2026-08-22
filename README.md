@@ -44,15 +44,19 @@ pip install -r requirements.txt
 **3. Run the Backend API (Terminal 1)**
 
 ```bash
-uvicorn app.main:app --reload
+uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
 
 ```
 
 **4. Run the Streamlit Dashboard (Terminal 2)**
 
 ```bash
-streamlit run frontend/app.py
+streamlit run frontend/app.py --server.port 8501
 ```
+
+Open the dashboard at `http://127.0.0.1:8501/`. The API runs at `http://127.0.0.1:8001/`.
+
+The first startup creates the local SQLite database and demo staff accounts. Demo authority access is `city_ops` / `urbanpulse-demo`; replace seeded credentials before deployment.
 
 ## 🤝 Team 4
 
