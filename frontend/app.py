@@ -41,6 +41,10 @@ div.stButton > button { border-radius: 6px; font-weight: 650; min-height: 2.8rem
 [data-testid="stMetric"] { background: #fff; border: 1px solid #dbe3ee; border-radius: 8px; padding: 0.85rem; }
 [data-testid="stTextArea"] textarea { background: #fff !important; color: #152238 !important; caret-color: #152238 !important; }
 [data-testid="stTextInput"] input { background: #fff !important; color: #152238 !important; caret-color: #152238 !important; }
+.role-panel { background: #fff; border: 1px solid #dbe3ee; border-radius: 8px; padding: 1.35rem; min-height: 155px; }
+.role-panel h3 { margin: 0 0 0.45rem; color: #152238; font-size: 1.05rem; }
+.role-panel p { margin: 0 0 1rem; color: #667085; font-size: 0.9rem; }
+.session-banner { background: #eafaf1; border: 1px solid #b9ebce; color: #087443; border-radius: 6px; padding: 0.65rem 0.8rem; font-size: 0.9rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -145,17 +149,81 @@ def api_request(method, path, **kwargs):
         return None
 
 
+if "user_role" not in st.session_state:
+    st.session_state["user_role"] = None
+
+
+def render_login_screen():
+    """Keep role selection explicit before exposing any workspace navigation."""
+    st.markdown("<div class='eyebrow'>UrbanPulse AI</div>", unsafe_allow_html=True)
+    st.title("Report safer streets")
+    st.markdown(
+        "<div class='page-subtitle'>Choose how you want to use the platform.</div>",
+        unsafe_allow_html=True,
+    )
+    citizen_column, authority_column = st.columns(2, gap="large")
+    with citizen_column:
+        st.markdown(
+            "<div class='role-panel'><h3>Citizen</h3>"
+            "<p>File a road-damage complaint, add its location, and track progress.</p></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Continue as citizen", type="primary", use_container_width=True):
+            st.session_state["user_role"] = "citizen"
+            st.rerun()
+    with authority_column:
+        st.markdown(
+            "<div class='role-panel'><h3>Municipal authority</h3>"
+            "<p>Sign in with your verified staff account to review and manage complaints.</p></div>",
+            unsafe_allow_html=True,
+        )
+        with st.form("authority_login_form"):
+            identifier = st.text_input("Username or email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Authority sign in", use_container_width=True)
+            if submitted:
+                response = api_request(
+                    "POST",
+                    "/api/auth/login",
+                    json={"role": "authority", "identifier": identifier, "password": password},
+                )
+                if response is not None and response.status_code == 200:
+                    st.session_state["user_role"] = "authority"
+                    st.session_state["staff_session"] = response.json()
+                    st.rerun()
+                elif response is not None:
+                    st.error(response.json().get("detail", "Invalid authority credentials."))
+    st.divider()
+    st.caption("Citizen access requires no account. Authority access is restricted to verified credentials.")
+
+
+if st.session_state["user_role"] is None:
+    render_login_screen()
+    st.stop()
+
+
 defects_list = fetch_defects()
 
 with st.sidebar:
     st.markdown("## UrbanPulse AI")
-    st.caption("Urban infrastructure intelligence")
+    role_label = "Citizen workspace" if st.session_state["user_role"] == "citizen" else "Authority workspace"
+    st.caption(role_label)
     st.divider()
-    page = st.radio("Workspace", ["New Report", "Track Complaint", "Staff Access", "Dashboard", "Reports", "Map View", "Work Orders", "Analytics", "Settings"], index=0, label_visibility="collapsed")
+    if st.session_state["user_role"] == "citizen":
+        pages = ["New Report", "Track Complaint"]
+    else:
+        pages = ["Dashboard", "Reports", "Map View", "Work Orders", "Analytics"]
+    page = st.radio("Workspace", pages, index=0, label_visibility="collapsed")
     st.divider()
+    if st.session_state["user_role"] == "authority":
+        st.markdown("<div class='session-banner'>Verified authority session</div>", unsafe_allow_html=True)
     status_css = "status-online" if backend_is_available() else "status-offline"
     status_text = "Backend connected" if status_css == "status-online" else "Standalone mode: backend offline"
     st.markdown(f"<div class='{status_css}'>{status_text}</div>", unsafe_allow_html=True)
+    if st.button("Sign out", use_container_width=True):
+        st.session_state.pop("staff_session", None)
+        st.session_state["user_role"] = None
+        st.rerun()
 
 
 if page == "New Report":
@@ -257,37 +325,6 @@ elif page == "Track Complaint":
         elif response is not None:
             st.error(response.json().get("detail", "Complaint not found."))
 
-elif page == "Staff Access":
-    st.title("Verified staff access")
-    role = st.selectbox("Role", ["authority", "contractor"])
-    identifier = st.text_input("Username or email")
-    password = st.text_input("Password", type="password")
-    if st.button("Sign in", type="primary"):
-        response = api_request("POST", "/api/auth/login", json={"role": role, "identifier": identifier, "password": password})
-        if response is not None and response.status_code == 200:
-            st.session_state["staff_session"] = response.json()
-            st.success("Signed in successfully.")
-        elif response is not None:
-            st.error(response.json().get("detail", "Invalid staff credentials."))
-    staff_session = st.session_state.get("staff_session")
-    if staff_session:
-        headers = {"Authorization": f"Bearer {staff_session['access_token']}"}
-        if role == "authority":
-            response = api_request("GET", "/api/authority/complaints", headers=headers)
-            if response is not None and response.status_code == 200:
-                complaints = response.json()["complaints"]
-                st.dataframe(pd.DataFrame(complaints), use_container_width=True)
-                selected_id = st.number_input("Complaint to update", min_value=1, step=1)
-                selected_status = st.selectbox("New status", ["PENDING_VERIFICATION", "IN_PROGRESS", "RESOLVED"])
-                if st.button("Update complaint"):
-                    update = api_request("PATCH", f"/api/authority/complaints/{int(selected_id)}", headers=headers, json={"status": selected_status})
-                    if update is not None and update.status_code == 200:
-                        st.success("Complaint updated.")
-                    elif update is not None:
-                        st.error(update.json().get("detail", "Update failed."))
-        else:
-            st.info("Contractors can update only complaints assigned to their account.")
-
 elif page == "Dashboard":
     st.title("Infrastructure overview")
     total = len(defects_list)
@@ -298,6 +335,35 @@ elif page == "Dashboard":
         column.metric(label, value)
     st.divider()
     render_dynamic_map(height=500)
+    staff_session = st.session_state.get("staff_session")
+    if staff_session:
+        st.divider()
+        st.subheader("Complaint review queue")
+        headers = {"Authorization": f"Bearer {staff_session['access_token']}"}
+        response = api_request("GET", "/api/authority/complaints", headers=headers)
+        if response is not None and response.status_code == 200:
+            complaints = response.json().get("complaints", [])
+            if complaints:
+                st.dataframe(pd.DataFrame(complaints), use_container_width=True)
+                selected_id = st.number_input("Complaint ID to update", min_value=1, step=1)
+                selected_status = st.selectbox(
+                    "New complaint status",
+                    ["PENDING_VERIFICATION", "IN_PROGRESS", "RESOLVED"],
+                )
+                if st.button("Update complaint status", type="primary"):
+                    update = api_request(
+                        "PATCH",
+                        f"/api/authority/complaints/{int(selected_id)}",
+                        headers=headers,
+                        json={"status": selected_status},
+                    )
+                    if update is not None and update.status_code == 200:
+                        st.success("Complaint status updated.")
+                        st.rerun()
+                    elif update is not None:
+                        st.error(update.json().get("detail", "Update failed."))
+            else:
+                st.info("No complaints are waiting for review.")
 
 elif page == "Reports":
     st.title("Recorded reports")
