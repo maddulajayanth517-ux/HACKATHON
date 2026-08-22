@@ -23,6 +23,78 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "best.pt")
 MODEL = YOLO(MODEL_PATH)
 
 
+def estimate_pothole_severity(bbox, img_shape):
+    """Estimate pothole severity and mock depth from a 2D bounding box.
+
+    The depth value is a visual estimate, not a physical measurement. The
+    result is deliberately conservative when the box or image dimensions are
+    malformed so it can be used safely in a live video pipeline.
+    """
+    try:
+        if len(bbox) != 4 or len(img_shape) < 2:
+            raise ValueError
+
+        image_height = float(img_shape[0])
+        image_width = float(img_shape[1])
+        if image_height <= 0 or image_width <= 0:
+            raise ValueError
+
+        coordinates = [float(value) for value in bbox]
+        x1, y1, x2, y2 = coordinates
+        x1, x2 = sorted((max(0.0, min(image_width, x1)), max(0.0, min(image_width, x2))))
+        y1, y2 = sorted((max(0.0, min(image_height, y1)), max(0.0, min(image_height, y2))))
+
+        box_width = x2 - x1
+        box_height = y2 - y1
+        box_area = box_width * box_height
+        image_area = image_width * image_height
+        area_ratio = box_area / image_area
+
+        # A box ending near the bottom of the frame is visually closer.
+        proximity_score = y2 / image_height
+        area_score = min(area_ratio / 0.20, 1.0)
+
+        if box_width == 0 or box_height == 0:
+            shape_score = 0.0
+        else:
+            aspect_ratio = box_width / box_height
+            shape_score = max(0.0, 1.0 - min(abs(aspect_ratio - 1.0), 1.0))
+
+        risk_score = (area_score * 0.50) + (proximity_score * 0.30) + (shape_score * 0.20)
+
+        if risk_score >= 0.78:
+            severity_level, estimated_depth_cm = "Critical", 25
+            message = "Large structural pothole detected. Immediate maintenance required."
+        elif risk_score >= 0.55:
+            severity_level, estimated_depth_cm = "High", 20
+            message = "Significant pothole detected. Prompt maintenance recommended."
+        elif risk_score >= 0.30:
+            severity_level, estimated_depth_cm = "Medium", 15
+            message = "Moderate pothole detected. Maintenance recommended."
+        else:
+            severity_level, estimated_depth_cm = "Low", 5
+            message = "Small pothole detected. Routine maintenance recommended."
+
+        email_report_string = (
+            f"{severity_level.upper()} SEVERITY: {message} "
+            f"Estimated depth: ~{estimated_depth_cm}cm."
+        )
+        return {
+            "severity_level": severity_level,
+            "estimated_depth_cm": estimated_depth_cm,
+            "email_report_string": email_report_string,
+        }
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return {
+            "severity_level": "Low",
+            "estimated_depth_cm": 5,
+            "email_report_string": (
+                "LOW SEVERITY: Pothole geometry could not be estimated reliably. "
+                "Estimated depth: ~5cm. Manual review recommended."
+            ),
+        }
+
+
 def get_decimal_from_dms(dms, ref):
     """Converts Degrees/Minutes/Seconds EXIF to standard decimal format."""
     degrees, minutes, seconds = dms[0], dms[1], dms[2]
@@ -185,11 +257,19 @@ def analyze_media(file_path):
             )
 
         lat, lon = 16.2341, 80.5482
+        estimate = (
+            estimate_pothole_severity(overall_best_box, best_frame.shape)
+            if overall_defect and overall_best_box and best_frame is not None
+            else None
+        )
 
         return {
             "defect_detected": overall_defect,
             "defect_type": "Structural Defect" if overall_defect else "None",
             "severity_score": overall_max_severity if overall_defect else 0,
+            "severity_level": estimate["severity_level"] if estimate else None,
+            "estimated_depth_cm": estimate["estimated_depth_cm"] if estimate else None,
+            "email_report_string": estimate["email_report_string"] if estimate else None,
             "frames_checked": frame_count,
             "valid_detection_frames": len(valid_detections),
             "annotated_image_path": annotated_path,
@@ -203,11 +283,15 @@ def analyze_media(file_path):
         defect, severity, box = process_frame(img)
         annotate_and_save(img, severity, box, annotated_path)
         lat, lon = extract_gps(file_path)
+        estimate = estimate_pothole_severity(box, img.shape) if defect and box else None
 
         return {
             "defect_detected": defect,
             "defect_type": "Structural Defect" if defect else "None",
             "severity_score": severity if defect else 0,
+            "severity_level": estimate["severity_level"] if estimate else None,
+            "estimated_depth_cm": estimate["estimated_depth_cm"] if estimate else None,
+            "email_report_string": estimate["email_report_string"] if estimate else None,
             "annotated_image_path": annotated_path,
             "raw_lat": lat, "raw_lon": lon
         }

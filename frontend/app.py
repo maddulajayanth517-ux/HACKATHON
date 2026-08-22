@@ -9,7 +9,7 @@ import streamlit.components.v1 as components
 from streamlit_geolocation import streamlit_geolocation
 from PIL import Image
 
-BACKEND_BASE_URL = "http://127.0.0.1:8000"
+BACKEND_BASE_URL = "http://127.0.0.1:8001"
 MEDIA_TYPES = ["jpg", "jpeg", "png", "webp", "mp4"]
 VIDEO_TYPES = {"mp4"}
 
@@ -177,6 +177,12 @@ if page == "New Report":
             else:
                 vision = analysis.get("vision", {})
                 st.success(f"Confirmed: {vision.get('defect_type', 'Road defect')} | severity {severity}")
+                estimate_columns = st.columns(2)
+                estimate_columns[0].metric("AI severity", vision.get("severity_level") or "Unavailable")
+                depth = vision.get("estimated_depth_cm")
+                estimate_columns[1].metric("Estimated depth", f"~{depth} cm" if depth is not None else "Unavailable")
+                if vision.get("email_report_string"):
+                    st.info(vision["email_report_string"])
                 st.caption(f"Address: {analysis.get('address')} | Flood risk: {'High' if analysis.get('is_flood_prone') else 'Normal'}")
                 email = analysis.get("email", {})
                 recipient = st.text_input("Municipal corporation email", placeholder="roads@municipality.gov")

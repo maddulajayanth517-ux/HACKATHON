@@ -59,6 +59,9 @@ I would like to report a suspected {defect_type.lower()} identified by UrbanPuls
 
 Report details:
 - Suggested severity: {severity}
+- AI severity: {vision_result.get('severity_level', 'Not available')}
+- Estimated depth: ~{vision_result.get('estimated_depth_cm', 'Not available')} cm
+- Automated assessment: {vision_result.get('email_report_string', 'Not available')}
 - Vision confidence: {vision_result.get('confidence', 'Not available')}
 - Address: {address}
 - Coordinates: {latitude:.6f}, {longitude:.6f}
