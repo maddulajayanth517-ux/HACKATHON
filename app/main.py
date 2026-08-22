@@ -7,9 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-from app.database import init_db, seed_sample_data
-from app.geo.database import get_all_defects
+from app.database import init_db as init_sqlalchemy_db, seed_sample_data
+from app.geo.database import get_all_defects, init_db as init_geo_db
 from app.geo.geo_dispatch import (
+    get_coordinates_from_address,
     get_elevation_and_flood_risk,
     get_reverse_geocode,
     process_and_dispatch_defect,
@@ -26,7 +27,8 @@ app = FastAPI(
 # Initialize the SQLAlchemy database tables at startup.
 @app.on_event("startup")
 def startup_event():
-    init_db()
+    init_sqlalchemy_db()
+    init_geo_db()
     seed_sample_data()
 
 # Enable CORS for frontend integration
@@ -39,11 +41,19 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def startup_db_and_map():
+    """Initializes the database and pre-renders the dispatch map."""
+    init_geo_db()
+    render_folium_map("dispatch_map.html")
+
+
 class DispatchRequest(BaseModel):
     defect_type: str = "Pothole"
     severity: str = "High"
-    latitude: float
-    longitude: float
+    latitude: float | None = None
+    longitude: float | None = None
+    manual_address: str | None = None
     contractor_email: str = "contractor@cityworks.gov"
 
 
@@ -99,16 +109,22 @@ async def analyze_report_media(
     manual_address: str = Form(default=""),
     severity: str = Form(default="High"),
 ):
-    """Analyze uploaded evidence and return location plus a reviewable email draft."""
+    """Analyze uploaded evidence, resolve location via GPS/Geocoding, and return a reviewable email draft."""
 
     if not media.filename:
         raise HTTPException(status_code=400, detail="A photo or video is required.")
+    if (latitude is None or longitude is None) and not manual_address.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Provide browser coordinates or a manual address.",
+        )
+
+    # 1. Resolve GPS Coordinates: If GPS not granted, forward-geocode the text address
+    if (latitude is None or longitude is None or (latitude == 0.0 and longitude == 0.0)) and manual_address.strip():
+        latitude, longitude = get_coordinates_from_address(manual_address.strip())
+
     if latitude is None or longitude is None:
-        if not manual_address.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Provide browser coordinates or a manual address.",
-            )
+        latitude, longitude = 12.9352, 77.6245  # Bangalore fallback
 
     suffix = os.path.splitext(media.filename)[1].lower()
     temporary_path = None
@@ -120,16 +136,18 @@ async def analyze_report_media(
             temporary_file.write(content)
             temporary_path = temporary_file.name
 
+        # 2. Vision Engine Analysis
         vision_result = analyze_media(temporary_path)
         if vision_result.get("error"):
             raise HTTPException(status_code=422, detail=vision_result["error"])
 
-        if latitude is not None and longitude is not None:
-            address = get_reverse_geocode(latitude, longitude)
-            elevation, is_flood_prone = get_elevation_and_flood_risk(latitude, longitude)
-        else:
+        # 3. Address and Flood Hazard Profiling
+        if manual_address.strip():
             address = manual_address.strip()
-            elevation, is_flood_prone = 0.0, False
+        else:
+            address = get_reverse_geocode(latitude, longitude)
+
+        elevation, is_flood_prone = get_elevation_and_flood_risk(latitude, longitude)
 
         if not vision_result.get("defect_detected"):
             return {
@@ -137,21 +155,37 @@ async def analyze_report_media(
                 "message": "No supported road defect was confirmed in the uploaded media.",
                 "vision": vision_result,
                 "address": address,
+                "latitude": latitude,
+                "longitude": longitude,
             }
 
         defect_type = vision_result.get("defect_type", "Road defect")
         confidence = vision_result.get("confidence", "Confirmed by repeated evidence")
         vision_result["source_file"] = media.filename
+
+        # 4. Dispatch, Save to Database, and Update Folium Map
+        dispatch_result = process_and_dispatch_defect(
+            defect_type=defect_type,
+            severity=severity,
+            lat=latitude,
+            lon=longitude,
+            manual_address=address,
+        )
+
         email = build_email_draft(
             defect_type,
             severity,
             address,
-            latitude or 0.0,
-            longitude or 0.0,
+            latitude,
+            longitude,
             {**vision_result, "confidence": confidence},
             elevation,
             is_flood_prone,
         )
+
+        # Render updated HTML map
+        render_folium_map("dispatch_map.html")
+
         return {
             "status": "ANALYZED",
             "vision": vision_result,
@@ -161,10 +195,14 @@ async def analyze_report_media(
             "elevation_meters": elevation,
             "is_flood_prone": is_flood_prone,
             "email": email,
+            "dispatch": dispatch_result,
         }
     finally:
         if temporary_path and os.path.exists(temporary_path):
-            os.remove(temporary_path)
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
 
 
 @app.get("/")
@@ -177,14 +215,23 @@ def root():
 
 @app.post("/api/geo/dispatch")
 def dispatch_defect(payload: DispatchRequest):
-    """Processes a detected defect: reverse geocoding, flood hazard assessment, duplicate check, and contractor alert."""
+    """Processes a defect: geocoding, flood hazard assessment, duplicate check, and contractor alert."""
+    lat, lon = payload.latitude, payload.longitude
+    if (lat is None or lon is None) and payload.manual_address:
+        lat, lon = get_coordinates_from_address(payload.manual_address)
+
+    if lat is None or lon is None:
+        lat, lon = 12.9352, 77.6245
+
     result = process_and_dispatch_defect(
         defect_type=payload.defect_type,
         severity=payload.severity,
-        lat=payload.latitude,
-        lon=payload.longitude,
+        lat=lat,
+        lon=lon,
         contractor_email=payload.contractor_email,
+        manual_address=payload.manual_address,
     )
+    render_folium_map("dispatch_map.html")
     return result
 
 

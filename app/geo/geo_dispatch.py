@@ -12,6 +12,37 @@ from app.geo.database import (
 geolocator = Nominatim(user_agent="urban_pulse_ai_dispatch_engine")
 
 
+def get_coordinates_from_address(address: str) -> tuple[float, float]:
+    """
+    Forward geocodes a human-readable text address into GPS (lat, lon) coordinates.
+    Falls back to Bangalore coordinates (12.9352, 77.6245) if lookup fails.
+    """
+    if not address or not address.strip():
+        return 12.9352, 77.6245
+
+    try:
+        location = geolocator.geocode(address.strip(), timeout=10)
+        if location:
+            return float(location.latitude), float(location.longitude)
+    except Exception as e:
+        print(f"[FORWARD GEOCODE ERROR] {e}")
+
+    # Fallback to direct Nominatim JSON endpoint if geopy times out
+    try:
+        url = "https://nominatim.openstreetmap.org/search"
+        headers = {"User-Agent": "UrbanPulse-AI-GeoEngine/1.0"}
+        params = {"q": address.strip(), "format": "json", "limit": 1}
+        res = requests.get(url, headers=headers, params=params, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if len(data) > 0:
+                return float(data[0]["lat"]), float(data[0]["lon"])
+    except Exception as e:
+        print(f"[FALLBACK GEOCODE ERROR] {e}")
+
+    return 12.9352, 77.6245
+
+
 def get_reverse_geocode(lat: float, lon: float) -> str:
     """Converts GPS coordinates into a human-readable street address."""
     try:
@@ -70,9 +101,15 @@ def process_and_dispatch_defect(
     lat: float,
     lon: float,
     contractor_email: str = "contractor@cityworks.gov",
+    manual_address: str = None,
 ) -> dict:
-    """Main pipeline for Member 3: GIS processing, duplicate filter, DB recording, and dispatch."""
-    # 1. Duplicate check
+    """Main pipeline: Resolves coordinates, GIS processing, duplicate filter, DB recording, and dispatch."""
+    
+    # 0. If lat/lon are missing or zero, resolve from manual address
+    if (lat is None or lon is None or (lat == 0.0 and lon == 0.0)) and manual_address:
+        lat, lon = get_coordinates_from_address(manual_address)
+
+    # 1. Duplicate check (within 15 meters)
     if is_duplicate_complaint(lat, lon, threshold_meters=15.0):
         return {
             "status": "DUPLICATE_IGNORED",
@@ -81,8 +118,11 @@ def process_and_dispatch_defect(
             "lon": lon,
         }
 
-    # 2. Reverse Geocode address
-    address = get_reverse_geocode(lat, lon)
+    # 2. Reverse Geocode address (or keep user provided address)
+    if manual_address and manual_address.strip():
+        address = manual_address
+    else:
+        address = get_reverse_geocode(lat, lon)
 
     # 3. Elevation & flood hazard profiling
     elevation, is_flood_prone = get_elevation_and_flood_risk(lat, lon)
@@ -111,10 +151,15 @@ def process_and_dispatch_defect(
         contractor_email, defect_summary, route_url
     )
 
+    # 6. Re-generate interactive map centered on this new report
+    render_folium_map(output_html_path="dispatch_map.html")
+
     return {
         "status": "PROCESSED_AND_DISPATCHED",
         "record_id": record_id,
         "address": address,
+        "latitude": lat,
+        "longitude": lon,
         "elevation_meters": elevation,
         "is_flood_prone": is_flood_prone,
         "google_maps_route": route_url,
@@ -122,19 +167,23 @@ def process_and_dispatch_defect(
     }
 
 
-def render_folium_map(output_html_path: str = "static_map.html") -> str:
-    """Renders all defects stored in DB into an interactive HTML map."""
+def render_folium_map(output_html_path: str = "dispatch_map.html") -> str:
+    """Renders all defects stored in DB into an interactive HTML map centered on the latest report."""
     defects = get_all_defects()
 
     if defects:
-        center_lat = defects[0]["latitude"]
-        center_lon = defects[0]["longitude"]
+        # Center map on the latest reported defect
+        center_lat = defects[-1]["latitude"]
+        center_lon = defects[-1]["longitude"]
+        zoom_level = 14
     else:
-        center_lat, center_lon = 16.234, 80.548
+        # Default starting coordinates (e.g. Bangalore center)
+        center_lat, center_lon = 12.9352, 77.6245
+        zoom_level = 12
 
     folium_map = folium.Map(
         location=[center_lat, center_lon],
-        zoom_start=14,
+        zoom_start=zoom_level,
         tiles="OpenStreetMap",
     )
 
@@ -149,12 +198,12 @@ def render_folium_map(output_html_path: str = "static_map.html") -> str:
 
         popup_html = f"""
         <div style="font-family: Arial; min-width: 180px;">
-            <h4><b>{item['defect_type']}</b></h4>
-            <p><b>Severity:</b> {item['severity']}</p>
-            <p><b>Flood Hotspot:</b> {'YES' if is_flood else 'NO'}</p>
-            <p><b>Elevation:</b> {item['elevation']} m</p>
-            <p><b>Address:</b> {item['address']}</p>
-            <a href="{route_url}" target="_blank" style="color: blue; text-decoration: underline;">Open Turn-by-Turn Navigation</a>
+            <h4 style="margin:0 0 5px 0;"><b>{item['defect_type']}</b></h4>
+            <p style="margin:2px 0;"><b>Severity:</b> {item['severity']}</p>
+            <p style="margin:2px 0;"><b>Flood Hotspot:</b> {'YES' if is_flood else 'NO'}</p>
+            <p style="margin:2px 0;"><b>Elevation:</b> {item['elevation']} m</p>
+            <p style="margin:2px 0;"><b>Address:</b> {item['address']}</p>
+            <a href="{route_url}" target="_blank" style="color: blue; text-decoration: underline; display: inline-block; margin-top: 5px;">Turn-by-Turn Navigation</a>
         </div>
         """
 

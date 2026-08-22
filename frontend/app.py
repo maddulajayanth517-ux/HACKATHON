@@ -1,5 +1,4 @@
 import os
-import random
 from urllib.parse import quote
 
 import pandas as pd
@@ -34,16 +33,32 @@ h1 { font-size: 2.35rem !important; margin-bottom: 0.25rem !important; }
 .ai-result { background: #edfcf3; border: 1px solid #a6e8c2; border-left: 5px solid #12b76a; border-radius: 6px; padding: 1rem 1.1rem; margin: 1rem 0 1.25rem; }
 .ai-result-title { color: #087443; font-size: 0.96rem; font-weight: 700; margin-bottom: 0.35rem; }
 .ai-result p { margin: 0; color: #27553d; font-size: 0.93rem; }
-.ai-result strong { color: #152238; }
 .status-online { background: #eafaf1; color: #087443; border: 1px solid #b9ebce; border-radius: 6px; padding: 0.65rem 0.75rem; font-size: 0.9rem; }
 .status-offline { background: #fff4e8; color: #9a4c08; border: 1px solid #f5c896; border-radius: 6px; padding: 0.65rem 0.75rem; font-size: 0.9rem; }
 .map-placeholder { background: #fff; border: 1px solid #dbe3ee; border-radius: 8px; min-height: 360px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #667085; padding: 1.1rem; }
-.map-placeholder strong { color: #152238; font-size: 1rem; margin-bottom: 0.35rem; }
 div.stButton > button { border-radius: 6px; font-weight: 650; min-height: 2.8rem; }
 [data-testid="stFileUploader"] { background: #fff; border: 1px dashed #9aaec6; border-radius: 8px; padding: 0.35rem; }
 [data-testid="stMetric"] { background: #fff; border: 1px solid #dbe3ee; border-radius: 8px; padding: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
+
+
+def geocode_manual_address(address: str):
+    """Converts a text address to (lat, lon) using OpenStreetMap."""
+    if not address or not address.strip():
+        return None, None
+    url = "https://nominatim.openstreetmap.org/search"
+    headers = {"User-Agent": "UrbanPulse-AI-Hackathon-Client"}
+    params = {"q": address.strip(), "format": "json", "limit": 1}
+    try:
+        res = requests.get(url, headers=headers, params=params, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if data:
+                return float(data[0]["lat"]), float(data[0]["lon"])
+    except Exception:
+        pass
+    return None, None
 
 
 def fetch_defects():
@@ -63,22 +78,37 @@ def backend_is_available():
         return False
 
 
-def detect_issue(filename):
-    """Temporary filename-based detection until the vision service is connected."""
-    filename = filename.lower()
-    if "crack" in filename:
-        return "Road crack", "Medium", 0.88
-    if "water" in filename or "wet" in filename or "flood" in filename:
-        return "Waterlogging", "High", 0.91
-    return "Pothole", "High", 0.94
-
-
-def render_map(height=520):
-    if os.path.exists("dispatch_map.html"):
+def render_dynamic_map(lat=None, lon=None, label="Reported Location", height=520):
+    """Renders map centered dynamically on current target coordinates or falls back to backend file."""
+    if lat is not None and lon is not None:
+        leaflet_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+            <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+            <style>html, body, #map {{ height: 100%; width: 100%; margin: 0; padding: 0; }}</style>
+        </head>
+        <body>
+            <div id="map"></div>
+            <script>
+                var map = L.map('map').setView([{lat}, {lon}], 15);
+                L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+                    attribution: '© OpenStreetMap contributors'
+                }}).addTo(map);
+                L.marker([{lat}, {lon}]).addTo(map)
+                    .bindPopup('<b>{label}</b><br>Lat: {lat:.5f}, Lon: {lon:.5f}')
+                    .openPopup();
+            </script>
+        </body>
+        </html>
+        """
+        components.html(leaflet_html, height=height)
+    elif os.path.exists("dispatch_map.html"):
         with open("dispatch_map.html", "r", encoding="utf-8") as map_file:
             components.html(map_file.read(), height=height)
     else:
-        st.markdown("<div class='map-placeholder'><strong>Map data is not available yet</strong>Dispatch a report after connecting the backend to populate the city map.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='map-placeholder'><strong>Map data is not available yet</strong>Dispatch a report to populate the city map.</div>", unsafe_allow_html=True)
 
 
 def render_preview(media):
@@ -88,15 +118,6 @@ def render_preview(media):
         return "video"
     st.image(Image.open(media), caption=media.name, use_container_width=True)
     return "image"
-
-
-def render_detection(defect_type, severity, confidence, media_kind):
-    source = "video" if media_kind == "video" else "image"
-    st.markdown(
-        f"<div class='ai-result'><div class='ai-result-title'>Vision analysis complete</div>"
-        f"<p><strong>{defect_type}</strong> detected from the uploaded {source}. Confidence <strong>{confidence * 100:.0f}%</strong> | Suggested severity <strong>{severity}</strong></p></div>",
-        unsafe_allow_html=True,
-    )
 
 
 def analyze_uploaded_media(media, latitude, longitude, manual_address, severity):
@@ -136,20 +157,26 @@ if page == "New Report":
     with report_column:
         st.markdown("<div class='section-title'>Report evidence</div><div class='section-copy'>Upload a photo or MP4 video. The backend will analyze the actual media.</div>", unsafe_allow_html=True)
         uploaded_media = st.file_uploader("Upload report media", type=MEDIA_TYPES, help="Images and MP4 videos are supported.")
-        detected_class, suggested_severity, media_kind = "Road defect", "High", None
         if uploaded_media is not None:
-            media_kind = render_preview(uploaded_media)
+            render_preview(uploaded_media)
 
         st.markdown("<div class='section-title'>Location permission</div><div class='section-copy'>Allow location access if you are at the reported place. Otherwise enter its address manually.</div>", unsafe_allow_html=True)
         location = streamlit_geolocation()
         latitude = location.get("latitude") if location else None
         longitude = location.get("longitude") if location else None
+
+        active_lat, active_lon = latitude, longitude
+
         if latitude is not None and longitude is not None:
             st.success(f"Location permission granted: {latitude:.6f}, {longitude:.6f}")
             manual_address = ""
         else:
             st.info("Location was not granted or is unavailable. Manual address is required.")
-            manual_address = st.text_input("Reported place or address", placeholder="Street, area, city")
+            manual_address = st.text_input("Reported place or address", value="4th Cross Road, Koramangala 3rd Block, Bangalore, Karnataka 560034, India")
+            if manual_address.strip():
+                geo_lat, geo_lon = geocode_manual_address(manual_address)
+                if geo_lat and geo_lon:
+                    active_lat, active_lon = geo_lat, geo_lon
 
         severity_options = ["High", "Medium", "Low"]
         severity = st.selectbox("Suggested severity", severity_options, index=0)
@@ -157,14 +184,16 @@ if page == "New Report":
         if st.button("Analyze uploaded media", type="primary", use_container_width=True):
             if uploaded_media is None:
                 st.error("Upload a photo or video first.")
-            elif latitude is None and not manual_address.strip():
+            elif active_lat is None and not manual_address.strip():
                 st.error("Grant location permission or enter the reported address.")
             else:
                 with st.spinner("Analyzing media and resolving location..."):
                     try:
-                        response = analyze_uploaded_media(uploaded_media, latitude, longitude, manual_address, severity)
+                        response = analyze_uploaded_media(uploaded_media, active_lat, active_lon, manual_address, severity)
                         if response.status_code == 200:
                             st.session_state["analysis"] = response.json()
+                            requests.get(f"{BACKEND_BASE_URL}/api/geo/map", timeout=5)
+                            st.rerun()
                         else:
                             st.error(response.json().get("detail", "The backend could not analyze this media."))
                     except requests.RequestException as error:
@@ -192,21 +221,10 @@ if page == "New Report":
                     gmail_url = "https://mail.google.com/mail/?view=cm&fs=1&to=" + quote(recipient)
                     gmail_url += "&su=" + quote(subject) + "&body=" + quote(body)
                     st.link_button("Open Gmail draft", gmail_url, use_container_width=True)
-                    st.caption("Gmail requires you to review and press Send. This app cannot send email without your explicit action.")
-
-        if "last_dispatch" in st.session_state:
-            dispatch = st.session_state["last_dispatch"]
-            if dispatch.get("status") == "DUPLICATE_IGNORED":
-                st.warning(dispatch.get("message", "A nearby duplicate report was found."))
-            else:
-                st.success(f"Work order #{dispatch.get('record_id')} dispatched")
-                st.caption(f"{dispatch.get('address', 'Location pending')} | Elevation: {dispatch.get('elevation_meters', 'N/A')} m")
-                if dispatch.get("google_maps_route"):
-                    st.link_button("Open route in Google Maps", dispatch["google_maps_route"])
 
     with map_column:
         st.markdown("<div class='section-title'>Live city map</div><div class='section-copy'>Active reports and dispatch coverage update here.</div>", unsafe_allow_html=True)
-        render_map()
+        render_dynamic_map(lat=active_lat, lon=active_lon, label=manual_address or "Selected Location")
 
 elif page == "Dashboard":
     st.title("Infrastructure overview")
@@ -217,7 +235,7 @@ elif page == "Dashboard":
     for column, label, value in zip(st.columns(4), ["Recorded reports", "High priority", "Medium priority", "Flood-prone zones"], [total, critical, medium, flood]):
         column.metric(label, value)
     st.divider()
-    render_map(500)
+    render_dynamic_map(height=500)
 
 elif page == "Reports":
     st.title("Recorded reports")
@@ -231,7 +249,7 @@ elif page == "Map View":
             st.rerun()
         except requests.RequestException:
             st.warning("The backend is unavailable, so the map could not be refreshed.")
-    render_map(650)
+    render_dynamic_map(height=650)
 
 elif page == "Work Orders":
     st.title("Work orders")
