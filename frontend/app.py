@@ -41,6 +41,13 @@ div.stButton > button { border-radius: 6px; font-weight: 650; min-height: 2.8rem
 [data-testid="stMetric"] { background: #fff; border: 1px solid #dbe3ee; border-radius: 8px; padding: 0.85rem; }
 [data-testid="stTextArea"] textarea { background: #fff !important; color: #152238 !important; caret-color: #152238 !important; }
 [data-testid="stTextInput"] input { background: #fff !important; color: #152238 !important; caret-color: #152238 !important; }
+[data-testid="stNumberInput"] input { background: #fff !important; color: #152238 !important; caret-color: #152238 !important; }
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div { background: #fff !important; color: #152238 !important; }
+[data-testid="stSelectbox"] input { color: #152238 !important; }
+[data-testid="stMetric"] label, [data-testid="stMetricLabel"] { color: #667085 !important; }
+[data-testid="stMetricValue"] { color: #152238 !important; }
+[data-testid="stMetricDelta"] { color: #087443 !important; }
+[data-testid="stAlert"] { color: #152238 !important; }
 .role-panel { background: #fff; border: 1px solid #dbe3ee; border-radius: 8px; padding: 1.35rem; min-height: 155px; }
 .role-panel h3 { margin: 0 0 0.45rem; color: #152238; font-size: 1.05rem; }
 .role-panel p { margin: 0 0 1rem; color: #667085; font-size: 0.9rem; }
@@ -274,7 +281,12 @@ if page == "New Report":
                         else:
                             response = analyze_uploaded_media(uploaded_media, active_lat, active_lon, manual_address, severity, reporter_phone)
                         if response is not None and response.status_code == 200:
-                            st.session_state["analysis"] = response.json()
+                            analysis_result = response.json()
+                            st.session_state["analysis"] = analysis_result
+                            complaint = analysis_result.get("complaint", {})
+                            if complaint.get("id") is not None:
+                                st.session_state["last_complaint_id"] = complaint["id"]
+                                st.session_state["last_reporter_phone"] = reporter_phone.strip()
                             requests.get(f"{BACKEND_BASE_URL}/api/geo/map", timeout=5)
                             st.rerun()
                         elif response is not None:
@@ -295,6 +307,9 @@ if page == "New Report":
                 estimate_columns[1].metric("Estimated depth", f"~{depth} cm" if depth is not None else "Unavailable")
                 if vision.get("email_report_string"):
                     st.info(vision["email_report_string"])
+                complaint = analysis.get("complaint", {})
+                if complaint.get("id") is not None:
+                    st.success(f"Complaint registered: #{complaint['id']}. Save this ID to track progress.")
                 st.caption(f"Address: {analysis.get('address')} | Flood risk: {'High' if analysis.get('is_flood_prone') else 'Normal'}")
                 email = analysis.get("email", {})
                 recipient = st.text_input("Municipal corporation email", placeholder="roads@municipality.gov")
@@ -311,8 +326,16 @@ if page == "New Report":
 
 elif page == "Track Complaint":
     st.title("Track your complaint")
-    complaint_id = st.number_input("Complaint ID", min_value=1, step=1)
-    reporter_phone = st.text_input("Phone number used in the report")
+    complaint_id = st.number_input(
+        "Complaint ID",
+        min_value=1,
+        step=1,
+        value=int(st.session_state.get("last_complaint_id", 1)),
+    )
+    reporter_phone = st.text_input(
+        "Phone number used in the report",
+        value=st.session_state.get("last_reporter_phone", ""),
+    )
     if st.button("Check status", type="primary"):
         response = api_request("GET", f"/api/complaints/{int(complaint_id)}", params={"reporter_phone": reporter_phone})
         if response is not None and response.status_code == 200:

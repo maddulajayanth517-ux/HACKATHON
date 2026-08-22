@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import verify_password
 from app.database import get_db
+from app.email_alerts import alert_authority_via_email
 from app.geo.geo_dispatch import (
     get_coordinates_from_address,
     get_elevation_and_flood_risk,
@@ -251,6 +252,16 @@ async def analyze_report_media(
         db.add(complaint)
         db.commit()
         db.refresh(complaint)
+        notification_sent = alert_authority_via_email(
+            {
+                "complaint_id": complaint.id,
+                "severity_level": complaint.severity_level,
+                "manual_address": complaint.manual_address,
+                "reporter_phone": complaint.reporter_phone,
+                "estimated_depth_cm": complaint.estimated_depth_cm,
+            },
+            os.getenv("AUTHORITY_ALERT_EMAIL", "ops@urbanpulse.gov"),
+        )
         return {
             "status": "ANALYZED",
             "vision": vision_result,
@@ -261,6 +272,7 @@ async def analyze_report_media(
             "elevation_meters": elevation,
             "is_flood_prone": is_flood_prone,
             "email": email,
+            "notification_status": "Demo or sent" if notification_sent else "Failed",
             "dispatch": dispatch_result,
         }
     finally:

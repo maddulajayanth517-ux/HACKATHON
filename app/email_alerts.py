@@ -1,4 +1,5 @@
 import smtplib
+import os
 from email.message import EmailMessage
 
 
@@ -43,14 +44,22 @@ def alert_authority_via_email(complaint_data: dict, authority_email: str) -> boo
     """
     subject, body = build_authority_alert_message(complaint_data)
 
-    smtp_server = "smtp.gmail.com"
-    smtp_port = 587
-    smtp_username = "YOUR_SMTP_USERNAME"
-    smtp_password = "YOUR_SMTP_PASSWORD"
+    smtp_server = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_username = os.getenv("SMTP_USER") or os.getenv("APP_EMAIL", "")
+    smtp_password = os.getenv("SMTP_PASSWORD", "")
+    smtp_from = os.getenv("SMTP_FROM", smtp_username)
+
+    if not smtp_username or not smtp_password:
+        print(
+            f"[DEMO EMAIL] from={smtp_from or 'Smart City Complaint System'} "
+            f"to={authority_email} subject={subject}"
+        )
+        return True
 
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = smtp_username
+    msg["From"] = smtp_from
     msg["To"] = authority_email
     msg.set_content(body)
 
