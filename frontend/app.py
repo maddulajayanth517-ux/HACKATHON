@@ -39,6 +39,8 @@ h1 { font-size: 2.35rem !important; margin-bottom: 0.25rem !important; }
 div.stButton > button { border-radius: 6px; font-weight: 650; min-height: 2.8rem; }
 [data-testid="stFileUploader"] { background: #fff; border: 1px dashed #9aaec6; border-radius: 8px; padding: 0.35rem; }
 [data-testid="stMetric"] { background: #fff; border: 1px solid #dbe3ee; border-radius: 8px; padding: 0.85rem; }
+[data-testid="stTextArea"] textarea { background: #fff !important; color: #152238 !important; caret-color: #152238 !important; }
+[data-testid="stTextInput"] input { background: #fff !important; color: #152238 !important; caret-color: #152238 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -92,9 +94,9 @@ def render_dynamic_map(lat=None, lon=None, label="Reported Location", height=520
         <body>
             <div id="map"></div>
             <script>
-                var map = L.map('map').setView([{lat}, {lon}], 15);
+                const map = L.map('map').setView([{lat}, {lon}], 16);
                 L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-                    attribution: '© OpenStreetMap contributors'
+                    attribution: '&copy; OpenStreetMap contributors'
                 }}).addTo(map);
                 L.marker([{lat}, {lon}]).addTo(map)
                     .bindPopup('<b>{label}</b><br>Lat: {lat:.5f}, Lon: {lon:.5f}')
@@ -120,11 +122,11 @@ def render_preview(media):
     return "image"
 
 
-def analyze_uploaded_media(media, latitude, longitude, manual_address, severity):
+def analyze_uploaded_media(media, latitude, longitude, manual_address, severity, reporter_phone):
     files = {
         "media": (media.name, media.getvalue(), media.type or "application/octet-stream")
     }
-    data = {"severity": severity, "manual_address": manual_address}
+    data = {"severity": severity, "manual_address": manual_address, "reporter_phone": reporter_phone}
     if latitude is not None and longitude is not None:
         data.update({"latitude": latitude, "longitude": longitude})
     return requests.post(
@@ -135,13 +137,21 @@ def analyze_uploaded_media(media, latitude, longitude, manual_address, severity)
     )
 
 
+def api_request(method, path, **kwargs):
+    try:
+        return requests.request(method, f"{BACKEND_BASE_URL}{path}", timeout=10, **kwargs)
+    except requests.RequestException as error:
+        st.error(f"Backend unavailable: {error}")
+        return None
+
+
 defects_list = fetch_defects()
 
 with st.sidebar:
     st.markdown("## UrbanPulse AI")
     st.caption("Urban infrastructure intelligence")
     st.divider()
-    page = st.radio("Workspace", ["New Report", "Dashboard", "Reports", "Map View", "Work Orders", "Analytics", "Settings"], index=0, label_visibility="collapsed")
+    page = st.radio("Workspace", ["New Report", "Track Complaint", "Staff Access", "Dashboard", "Reports", "Map View", "Work Orders", "Analytics", "Settings"], index=0, label_visibility="collapsed")
     st.divider()
     status_css = "status-online" if backend_is_available() else "status-offline"
     status_text = "Backend connected" if status_css == "status-online" else "Standalone mode: backend offline"
@@ -180,6 +190,7 @@ if page == "New Report":
 
         severity_options = ["High", "Medium", "Low"]
         severity = st.selectbox("Suggested severity", severity_options, index=0)
+        reporter_phone = st.text_input("Your phone number", placeholder="Used only to track this complaint")
 
         if st.button("Analyze uploaded media", type="primary", use_container_width=True):
             if uploaded_media is None:
@@ -189,12 +200,16 @@ if page == "New Report":
             else:
                 with st.spinner("Analyzing media and resolving location..."):
                     try:
-                        response = analyze_uploaded_media(uploaded_media, active_lat, active_lon, manual_address, severity)
-                        if response.status_code == 200:
+                        if not reporter_phone.strip():
+                            st.error("Enter a phone number so you can track the complaint.")
+                            response = None
+                        else:
+                            response = analyze_uploaded_media(uploaded_media, active_lat, active_lon, manual_address, severity, reporter_phone)
+                        if response is not None and response.status_code == 200:
                             st.session_state["analysis"] = response.json()
                             requests.get(f"{BACKEND_BASE_URL}/api/geo/map", timeout=5)
                             st.rerun()
-                        else:
+                        elif response is not None:
                             st.error(response.json().get("detail", "The backend could not analyze this media."))
                     except requests.RequestException as error:
                         st.error(f"Backend unavailable: {error}")
@@ -225,6 +240,53 @@ if page == "New Report":
     with map_column:
         st.markdown("<div class='section-title'>Live city map</div><div class='section-copy'>Active reports and dispatch coverage update here.</div>", unsafe_allow_html=True)
         render_dynamic_map(lat=active_lat, lon=active_lon, label=manual_address or "Selected Location")
+
+elif page == "Track Complaint":
+    st.title("Track your complaint")
+    complaint_id = st.number_input("Complaint ID", min_value=1, step=1)
+    reporter_phone = st.text_input("Phone number used in the report")
+    if st.button("Check status", type="primary"):
+        response = api_request("GET", f"/api/complaints/{int(complaint_id)}", params={"reporter_phone": reporter_phone})
+        if response is not None and response.status_code == 200:
+            complaint = response.json()
+            st.success(f"Complaint #{complaint['id']} is {complaint['status']}")
+            columns = st.columns(3)
+            columns[0].metric("Severity", complaint["severity_level"])
+            columns[1].metric("Estimated depth", f"~{complaint['estimated_depth_cm']} cm" if complaint["estimated_depth_cm"] is not None else "Unavailable")
+            columns[2].metric("Address", complaint["address"] or "Unavailable")
+        elif response is not None:
+            st.error(response.json().get("detail", "Complaint not found."))
+
+elif page == "Staff Access":
+    st.title("Verified staff access")
+    role = st.selectbox("Role", ["authority", "contractor"])
+    identifier = st.text_input("Username or email")
+    password = st.text_input("Password", type="password")
+    if st.button("Sign in", type="primary"):
+        response = api_request("POST", "/api/auth/login", json={"role": role, "identifier": identifier, "password": password})
+        if response is not None and response.status_code == 200:
+            st.session_state["staff_session"] = response.json()
+            st.success("Signed in successfully.")
+        elif response is not None:
+            st.error(response.json().get("detail", "Invalid staff credentials."))
+    staff_session = st.session_state.get("staff_session")
+    if staff_session:
+        headers = {"Authorization": f"Bearer {staff_session['access_token']}"}
+        if role == "authority":
+            response = api_request("GET", "/api/authority/complaints", headers=headers)
+            if response is not None and response.status_code == 200:
+                complaints = response.json()["complaints"]
+                st.dataframe(pd.DataFrame(complaints), use_container_width=True)
+                selected_id = st.number_input("Complaint to update", min_value=1, step=1)
+                selected_status = st.selectbox("New status", ["PENDING_VERIFICATION", "IN_PROGRESS", "RESOLVED"])
+                if st.button("Update complaint"):
+                    update = api_request("PATCH", f"/api/authority/complaints/{int(selected_id)}", headers=headers, json={"status": selected_status})
+                    if update is not None and update.status_code == 200:
+                        st.success("Complaint updated.")
+                    elif update is not None:
+                        st.error(update.json().get("detail", "Update failed."))
+        else:
+            st.info("Contractors can update only complaints assigned to their account.")
 
 elif page == "Dashboard":
     st.title("Infrastructure overview")

@@ -6,6 +6,7 @@ from typing import Generator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.auth import hash_password
 from app.models import Authority, Base, Complaint, ComplaintStatus, Contractor
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./urbanpulse.db")
@@ -40,10 +41,12 @@ def seed_sample_data() -> dict:
             authority = Authority(
                 username="city_ops",
                 email="ops@urbanpulse.gov",
-                password_hash="demo_hash",
+                password_hash=hash_password("urbanpulse-demo"),
                 department="Public Works",
             )
             db.add(authority)
+        elif not authority.password_hash.startswith("pbkdf2_sha256$"):
+            authority.password_hash = hash_password("urbanpulse-demo")
 
         contractor = db.query(Contractor).filter_by(email="contact@metrofix.com").first()
         if contractor is None:
@@ -51,9 +54,11 @@ def seed_sample_data() -> dict:
                 company_name="MetroFix Contractors",
                 email="contact@metrofix.com",
                 phone="+15551234567",
-                password_hash="demo_contract_hash",
+                password_hash=hash_password("urbanpulse-contractor"),
             )
             db.add(contractor)
+        elif not contractor.password_hash.startswith("pbkdf2_sha256$"):
+            contractor.password_hash = hash_password("urbanpulse-contractor")
 
         complaint = db.query(Complaint).filter_by(reporter_phone="+15557654321").first()
         if complaint is None:
